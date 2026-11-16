@@ -29,4 +29,4 @@ Functions:
 
 To be fixed:
 - buzzer is missing
-  
+- touch coordinations to be added
