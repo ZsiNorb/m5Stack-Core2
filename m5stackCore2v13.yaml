@@ -3,21 +3,6 @@ esphome:
   friendly_name: m5stack core2
   platformio_options:
     upload_speed: 460800
-  on_boot:
-    priority: 200  # Runs AFTER axp192 component setup so it isn't overwritten
-    then:
-      - lambda: |-
-          // 1. Enable Battery Voltage, Current, and VBUS ADCs (Register 0x82 = 0xFF)
-          uint8_t adc_en[] = {0x82, 0xFF};
-          id(bus_a).write_readv(0x34, adc_en, 2, nullptr, 0);
-
-          // 2. Enable Charging at 4.2V target, 300mA current, 10% cutoff (Register 0x33 = 0xC2)
-          uint8_t chg_en[] = {0x33, 0xC2};
-          id(bus_a).write_readv(0x34, chg_en, 2, nullptr, 0);
-
-          // 3. Disable N_OE / 5V boost feedback on GPIO0 so ACIN doesn't false-trigger (Register 0x90 = 0x07)
-          uint8_t gpio0[] = {0x90, 0x07};
-          id(bus_a).write_readv(0x34, gpio0, 2, nullptr, 0);
 
 esp32:
   board: m5stack-core2
@@ -29,8 +14,9 @@ psram:
   speed: 80MHz
  
 wifi:
-  #If the SSID of your WiFi is not configured in secrets.yaml, you can add it manually here
+  # change to your own SSID if it's not saved in secret.yaml
   ssid: !secret wifi_ssid
+  # change to your password if it's not saved in secret.yaml
   password: !secret wifi_password
   ap:
     ssid: "m5stack core2 Fallback"
@@ -38,7 +24,6 @@ wifi:
  
 captive_portal:
 web_server:
-  #Website shows all exposed data, interactive, HTTP
   port: 80
  
 logger:
@@ -47,21 +32,72 @@ logger:
 # Enable Home Assistant API 
 api:
   encryption:
-    #API encryption key, if it's not in your secrets.yaml, you need to manually add it
     key: !secret api_encryption_key
  
 ota:
   platform: esphome
-  #Change this password if it doesn't work for you or you can remove it completely
-  password: !secret ota_password
+  # change to your password if it's not saved in secret.yaml
+  #password: !secret wifi_password
  
 switch:
   - platform: restart
     name: "m5stack core2 Restart"
+  - platform: template
+    name: "M5Stack Core2 Vibration"
+    id: m5_vibration
+    icon: "mdi:vibrate"
+    turn_on_action:
+      - lambda: |-
+          // 1. Set LDO3 voltage to 3.0V (Register 0x28 = 0xCC)
+          uint8_t volt_cmd[2] = {0x28, 0xCC};
+          id(bus_a).write(0x34, volt_cmd, 2);
+
+          // 2. Read register 0x12 and set ONLY bit 3 (0x08) for LDO3, preserving screen power (LDO2)
+          uint8_t reg12 = 0x12;
+          uint8_t val = 0;
+          if (id(bus_a).write_readv(0x34, &reg12, 1, &val, 1) == esphome::i2c::ERROR_OK) {
+            uint8_t on_cmd[2] = {0x12, static_cast<uint8_t>(val | 0x08)};
+            id(bus_a).write(0x34, on_cmd, 2);
+          }
+      - delay: 250ms
+      - switch.turn_off: m5_vibration
+    turn_off_action:
+      - lambda: |-
+          // Read register 0x12 and clear ONLY bit 3 (~0x08) to stop the vibration motor
+          uint8_t reg12 = 0x12;
+          uint8_t val = 0;
+          if (id(bus_a).write_readv(0x34, &reg12, 1, &val, 1) == esphome::i2c::ERROR_OK) {
+            uint8_t off_cmd[2] = {0x12, static_cast<uint8_t>(val & ~0x08)};
+            id(bus_a).write(0x34, off_cmd, 2);
+          }
  
 external_components:
   - source: github://martydingo/esphome-axp192
     components: [axp192]
+
+# Define the I2S audio bus mapping for the Core2 v1.3 speaker (NS4168 amplifier)
+i2s_audio:
+  - id: i2s_out
+    i2s_lrclk_pin: GPIO0
+    i2s_bclk_pin: GPIO12
+
+# Speaker configuration using an external DAC type
+speaker:
+  - platform: i2s_audio
+    id: m5_speaker
+    dac_type: external
+    i2s_dout_pin: GPIO2
+    channel: mono
+    i2s_mode: primary
+
+# Media player wrapper so you can stream audio / TTS from Home Assistant
+media_player:
+  - platform: speaker
+    id: m5_media_player
+    name: "M5Stack Core2 Speaker"
+    announcement_pipeline:
+      speaker: m5_speaker
+      format: FLAC
     
 number:
   - platform: template
@@ -73,7 +109,6 @@ number:
     optimistic: true
     restore_value: true
     initial_value: 75
-
     set_action:
       - lambda: |-
           id(axp).set_brightness(x / 100.0f);
@@ -105,7 +140,6 @@ sensor:
         return raw * 0.0011f;  // 1.1mV per LSB
       }
       return NAN;
-
   - platform: template
     name: "M5Core2 Battery Charge Current"
     unit_of_measurement: "mA"
@@ -158,12 +192,21 @@ sensor:
     name: "BMI270 Gyro Z"
     filters: 
       - throttle_average: 1s
-    
   - platform: motion
     type: roll
     name: "BMI270 Roll"
     filters: 
       - throttle_average: 1s
+  - platform: template
+    name: "Touch X"
+    id: touch_x_coordinate
+    unit_of_measurement: "px"
+    accuracy_decimals: 0
+  - platform: template
+    name: "Touch Y"
+    id: touch_y_coordinate
+    unit_of_measurement: "px"
+    accuracy_decimals: 0
  
 spi:
   clk_pin: GPIO18
@@ -176,162 +219,17 @@ i2c:
     scl: GPIO22
     scan: true
  
-display:
-  - platform: mipi_spi
-    id: my_display
-    model: M5CORE
-    cs_pin: GPIO5
-    dc_pin: GPIO15
-
-    update_interval: 500ms
-    invert_colors: true
-
-    show_test_card: true
-    color_order: BGR
-    dimensions:
-      height: 240
-      width: 320
-
-    lambda: |-
-      const auto COLOR_WHITE = Color(255, 255, 255);
-      const auto COLOR_BLACK = Color(0, 0, 0);
-      const auto COLOR_RED = Color(255, 0, 0);
-      const auto COLOR_GREEN = Color(0, 255, 0);
-      const auto COLOR_BLUE = Color(0, 0, 255);
-      const auto COLOR_YELLOW = Color(255, 255, 0);
-      const auto COLOR_ORANGE = Color(255, 165, 0);
-      auto color_off = COLOR_WHITE;
-      auto color_on = COLOR_BLACK;
-
-      // Helper to split text into wrapped lines at widget boundary
-      auto wrap_text_lines = [&](int max_w, esphome::font::Font *font, const char* text, std::vector<std::string> &lines) {
-        lines.clear();
-        if (!text || max_w <= 0) return;
-        std::string line;
-        std::string word;
-        const char* p = text;
-        auto commit_word = [&]() {
-          if (word.empty()) return;
-          std::string cand = line.empty() ? word : (line + " " + word);
-          int cw = 0, cx_b = 0, cbl = 0, ch = 0;
-          font->measure(cand.c_str(), &cw, &cx_b, &cbl, &ch);
-          if (cw > max_w && !line.empty()) {
-            lines.push_back(line);
-            line = word;
-          } else {
-            line = cand;
-          }
-          word.clear();
-        };
-        while (*p) {
-          if (*p == '\r') {
-            p++;
-            continue;
-          }
-          if (*p == '\n') {
-            commit_word();
-            lines.push_back(line);
-            line.clear();
-          } else if (*p == ' ' || *p == '\t') {
-            commit_word();
-          } else {
-            word += *p;
-          }
-          p++;
-        }
-        commit_word();
-        if (!line.empty()) {
-          lines.push_back(line);
-        }
-      };
-
-      // Helper to print text with word-wrap at widget boundary
-      auto print_wrapped_text = [&](int x, int y, int max_w, int line_h, esphome::font::Font *font, Color color, TextAlign align, const char* text) {
-        std::vector<std::string> lines;
-        wrap_text_lines(max_w, font, text, lines);
-        if (lines.empty()) return;
-        int cy = y;
-        if (align == TextAlign::CENTER || align == TextAlign::CENTER_LEFT || align == TextAlign::CENTER_RIGHT) {
-          cy = y - ((int)lines.size() - 1) * line_h / 2;
-        } else if (align == TextAlign::BOTTOM_LEFT || align == TextAlign::BOTTOM_CENTER || align == TextAlign::BOTTOM_RIGHT) {
-          cy = y - ((int)lines.size() - 1) * line_h;
-        }
-        for (const auto &l : lines) {
-          it.print(x, cy, font, color, align, l.c_str());
-          cy += line_h;
-        }
-      };
-
-      int currentPage = id(display_page);
-      static int last_rendered_page = -1;
-      bool page_changed = (last_rendered_page != currentPage);
-      if (page_changed) last_rendered_page = currentPage;
-      // ═══════════════════════════════════════════════════════════════
-      // ▸ PAGE: Page 1
-      // ═══════════════════════════════════════════════════════════════
-      if (currentPage == 0) {
-        // page:name "Page 1"
-        // page:dark_mode "inherit"
-        // page:refresh_type "interval"
-        // page:refresh_time ""
-        // page:visible_from ""
-        // page:visible_to ""
-        // Clear screen for this page
-        if (page_changed) {
-          id(current_page_sensor).publish_state(1);
-          // Full clear on page change (prevents black artifacts)
-          it.filled_rectangle(0, 0, it.get_width(), it.get_height(), COLOR_WHITE);
-        } else {
-          // Fast clear for same-page updates
-          it.fill(COLOR_WHITE);
-        }
-        color_off = COLOR_WHITE;
-        color_on = COLOR_BLACK;
-        // widget:label id:w_mwgus6srl70bs type:label x:40 y:40 w:240 h:139 text:"Sample text"
-                it.printf(40, 40, id(font_roboto_400_20), color_on, TextAlign::TOP_LEFT, "Hello World!");
-        // SAMPLE IMAGE (location: /homeassistant/esphome/images/whatever.jpg)
-        // widget:image id:w_mwhsesfhfmg0f type:image x:0 y:0 w:320 h:216 path:"/config/esphome/images/_NZS2614.jpg"
-                it.image(0, 0, id(img_config_esphome_images_NZS2614_jpg_320x216));
-       
-      }
-      // ═══════════════════════════════════════════════════════════════
-      // ▸ PAGE: Page 2
-      // ═══════════════════════════════════════════════════════════════
-      if (currentPage == 1) {
-        // page:name "Page 2"
-        // page:dark_mode "inherit"
-        // page:refresh_type "interval"
-        // page:refresh_time ""
-        // page:visible_from ""
-        // page:visible_to ""
-        // Clear screen for this page
-        if (page_changed) {
-          id(current_page_sensor).publish_state(2);
-          // Full clear on page change (prevents black artifacts)
-          it.filled_rectangle(0, 0, it.get_width(), it.get_height(), COLOR_RED);
-        } else {
-          // Fast clear for same-page updates
-          it.fill(COLOR_RED);
-        }
-        color_off = COLOR_WHITE;
-        color_on = COLOR_BLACK;
-        // widget:label id:w_mwgv7yi85lo7e type:label x:40 y:40 w:120 h:40 text:"2nd page sample text"
-                it.printf(40, 40, id(font_roboto_400_20), color_on, TextAlign::TOP_LEFT, "Nothing to see here, go away!");
-                // widget:icon id:w_mwgwxm6pwjf5q type:icon x:130 y:136 w:60 h:60
-                it.printf(160, 166, id(font_material_design_icons_400_48), color_on, TextAlign::CENTER, "%s", "\U000F07D0");             
-      }
-
-    
 touchscreen:
   - platform: ft63x6
+    id: core2_touch
+    i2c_id: bus_a
     interrupt_pin: GPIO39
+    on_touch:
+      - lambda: |-
+          id(touch_x_coordinate).publish_state(touch.x);
+          id(touch_y_coordinate).publish_state(touch.y);
  
 binary_sensor:
-  # the virtual buttons--coordinates taken from
-  # https://github.com/m5stack/M5Core2/blob/0134dd3a38cfd335a1ec39da2c149f88baf54326/src/M5Core2.h#L54-L56
-  # and
-  # https://github.com/m5stack/M5Core2/blob/0134dd3a38cfd335a1ec39da2c149f88baf54326/src/utility/M5Button.h#L811-L815
-  # for the parameter order `(x, y, width, height)`
   - platform: template
     name: "M5Core2 Battery Charging"
     device_class: battery_charging
@@ -345,9 +243,7 @@ binary_sensor:
       bool ok1 = (id(bus_a).write_readv(0x34, &reg1, 1, &chg_status, 1) == esphome::i2c::ERROR_OK);
 
       if (ok0 && ok1) {
-        // Reg 0x00: Bit 7 = ACIN present, Bit 5 = VBUS (USB) present
         bool external_power = (pwr_status & 0xA0) != 0;
-        // Reg 0x01: Bit 6 = Charging active
         bool charging_bit = (chg_status & 0x40) != 0;
         return external_power && charging_bit;
       }
@@ -359,7 +255,6 @@ binary_sensor:
     y_min: 240
     y_max: 280
     use_raw: true
- 
   - platform: touchscreen
     name: Button B
     x_min: 130
@@ -367,7 +262,6 @@ binary_sensor:
     y_min: 240
     y_max: 280
     use_raw: true
- 
   - platform: touchscreen
     name: Button C
     x_min: 230
@@ -388,7 +282,6 @@ text_sensor:
       name: m5stack core2 SSID
     bssid:
       name: m5stack core2 BSSID
-      
 
 globals:
   - id: display_page
@@ -411,13 +304,16 @@ globals:
     type: uint32_t
     restore_value: false
     initial_value: '0'
+
 http_request:
   verify_ssl: false
   timeout: 20s
   buffer_size_rx: 4096
+
 time:
   - platform: homeassistant
     id: ha_time
+
 button:
   - platform: template
     name: "Next Page"
@@ -467,6 +363,7 @@ font:
     id: font_material_design_icons_400_48
     size: 48
     glyphs: ["\U000F07D0"]
+
 script:
   - id: change_page_to
     parameters:
@@ -478,59 +375,124 @@ script:
           while (target < 0) target += pages_count;
           target %= pages_count;
 
-          // Debounce: Ignore page changes within 2000ms of last change
-          // (adjusted for LCD display update time)
           uint32_t now = millis();
           if (now - id(last_page_switch_time) < 2000) {
-            ESP_LOGD("display", "Page change ignored (debounce), last switch was %u ms ago", (unsigned int) (now - id(last_page_switch_time)));
             return;
           }
 
           if (id(display_page) != target) {
-            // Set debounce time BEFORE display update (update takes ~1.6s)
             id(last_page_switch_time) = now;
             id(display_page) = target;
             id(my_display)->update();
-            ESP_LOGI("display", "Switched to page %d", target);
           }
-
-  - id: manage_run_and_sleep
-    mode: restart
-    then:
-      - if:
-          condition:
-            lambda: 'return !(id(ha_time).now().is_valid() && api_is_connected());'
-          then:
-            - logger.log: "Waiting for sync..."
-            - wait_until:
-                condition:
-                  lambda: 'return id(ha_time).now().is_valid() && api_is_connected();'
-                timeout: 120s
-      - if:
-          condition:
-            lambda: 'return id(initial_sensor_sync_pending);'
-          then:
-            - logger.log: "ESPHome Designer build: sig=d8f1c7d9 mode=direct pages=2 widgets=2 types=label:2"
-            - logger.log: "OTA hint: if this build line does not match the YAML header, the device booted a different image or rolled back."
-            - logger.log: "Waiting 5s for initial sensor updates..."
-            - delay: 5s
-            - lambda: 'id(initial_sensor_sync_pending) = false;'
-      - lambda: |-
-          int p = id(display_page);
-          int interval = id(page_refresh_default_s);
-          id(page_refresh_current_s) = interval;
-      - delay: !lambda 'return id(page_refresh_current_s) * 1000;'
-      - script.execute: manage_run_and_sleep
 
 motion:
   - platform: bmi270
     id: motion_bmi270_1
 
 image:
-  # Add image, referenced in Page1
   - platform: file
     file: "/config/esphome/images/_NZS2614.jpg"
     id: img_config_esphome_images_NZS2614_jpg_320x216
     type: RGB
-    resize: 320x216
+    resize: 320x240
     dither: FLOYDSTEINBERG
+  - platform: file
+    file: "/config/esphome/images/segments_vertical_aligned_320x240.png"
+    id: page2naclground
+    type: RGB
+    resize: 320x240
+    dither: FLOYDSTEINBERG
+
+display:
+  - platform: mipi_spi
+    id: my_display
+    model: M5CORE2
+    cs_pin: GPIO5
+    dc_pin: GPIO15
+
+    update_interval: 500ms
+    invert_colors: true
+
+    show_test_card: true
+    color_order: BGR
+    dimensions:
+      height: 240
+      width: 320
+      
+    lambda: |-
+      const auto COLOR_WHITE = Color(255, 255, 255);
+      const auto COLOR_BLACK = Color(0, 0, 0);
+      const auto COLOR_RED = Color(255, 0, 0);
+      const auto COLOR_GREEN = Color(0, 255, 0);
+      const auto COLOR_BLUE = Color(0, 0, 255);
+      const auto COLOR_YELLOW = Color(255, 255, 0);
+      const auto COLOR_ORANGE = Color(255, 165, 0);
+      auto color_off = COLOR_WHITE;
+      auto color_on = COLOR_BLACK;
+
+      auto wrap_text_lines = [&](int max_w, esphome::font::Font *font, const char* text, std::vector<std::string> &lines) {
+        lines.clear();
+        if (!text || max_w <= 0) return;
+        std::string line;
+        std::string word;
+        const char* p = text;
+        auto commit_word = [&]() {
+          if (word.empty()) return;
+          std::string cand = line.empty() ? word : (line + " " + word);
+          int cw = 0, cx_b = 0, cbl = 0, ch = 0;
+          font->measure(cand.c_str(), &cw, &cx_b, &cbl, &ch);
+          if (cw > max_w && !line.empty()) {
+            lines.push_back(line);
+            line = word;
+          } else {
+            line = cand;
+          }
+          word.clear();
+        };
+        while (*p) {
+          if (*p == '\r') { p++; continue; }
+          if (*p == '\n') {
+            commit_word();
+            lines.push_back(line);
+            line.clear();
+          } else if (*p == ' ' || *p == '\t') {
+            commit_word();
+          } else {
+            word += *p;
+          }
+          p++;
+        }
+        commit_word();
+        if (!line.empty()) lines.push_back(line);
+      };
+
+      int currentPage = id(display_page);
+      static int last_rendered_page = -1;
+      bool page_changed = (last_rendered_page != currentPage);
+      if (page_changed) last_rendered_page = currentPage;
+
+      if (currentPage == 0) {
+        if (page_changed) {
+          id(current_page_sensor).publish_state(1);
+          it.filled_rectangle(0, 0, it.get_width(), it.get_height(), COLOR_BLACK);
+        } else {
+          it.fill(COLOR_BLACK);
+        }
+        color_off = COLOR_WHITE;
+        color_on = COLOR_BLACK;
+        it.printf(40, 40, id(font_roboto_400_20), color_on, TextAlign::TOP_LEFT, "Hello World");
+        it.image(0, 0, id(img_config_esphome_images_NZS2614_jpg_320x216));
+      }
+      if (currentPage == 1) {
+        if (page_changed) {
+          id(current_page_sensor).publish_state(2);
+          it.filled_rectangle(0, 0, it.get_width(), it.get_height(), COLOR_BLACK);
+        } else {
+          it.fill(COLOR_BLACK);
+        }
+        color_off = COLOR_WHITE;
+        color_on = COLOR_BLACK;
+        it.image(0, 0, id(page2naclground));
+      }
+    auto_clear_enabled: true
