@@ -25,8 +25,9 @@ Functions:
 - Gyro, roll and accelerator
 - Temp sensor
 - 3 buttons
+- sound media playback
+- touchscreen x and y exposed to HA
 
 
 To be fixed:
-- buzzer is missing
-- touch coordinations to be added
+- SPM1423 microphone to be enabled and wake-up words to be tested (note, this only has 1 microphone so no array)
